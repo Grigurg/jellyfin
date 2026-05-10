@@ -159,6 +159,15 @@ namespace Jellyfin.Server
 
                 mainApp.UseForwardedHeaders();
                 mainApp.UseMiddleware<ExceptionMiddleware>();
+                mainApp.Use(async (context, next) =>
+                {
+                    context.Response.OnStarting(() =>
+                    {
+                        context.Response.Headers["X-Korn-Jellyfin"] = "Grigurg fork";
+                        return System.Threading.Tasks.Task.CompletedTask;
+                    });
+                    await next().ConfigureAwait(false);
+                });
 
                 mainApp.UseMiddleware<ResponseTimeMiddleware>();
 
