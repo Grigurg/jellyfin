@@ -16,7 +16,7 @@ COPY --from=build /out/ /jellyfin/
 COPY deployment/korn/web/korn-family-add.js /jellyfin/jellyfin-web/korn-family-add.js
 RUN set -eux; \
     index=/jellyfin/jellyfin-web/index.html; \
-    marker='<script defer="defer" src="korn-family-add.js?v=20260510-1"></script>'; \
+    marker='<script defer="defer" src="korn-family-add.js?v=20260510-2"></script>'; \
     if ! grep -q 'korn-family-add.js' "$index"; then \
         sed -i "s#</head>#$marker</head>#" "$index"; \
     fi

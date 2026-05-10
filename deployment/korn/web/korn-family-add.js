@@ -41,9 +41,10 @@
 .family-add-bar{height:8px;background:#343434;border-radius:999px;overflow:hidden}
 .family-add-bar span{display:block;height:100%;background:#2f6b57;width:0}
 .family-add-row{display:flex;justify-content:space-between;gap:10px;color:rgba(255,255,255,.7);font-size:13px;margin-top:6px}
-.family-owner-filter{position:fixed;z-index:99998;display:none;align-items:center;gap:7px;color:#fff;font:700 13px system-ui}
+.family-owner-filter{z-index:99998;display:none;align-items:center;gap:7px;color:#fff;font:700 13px system-ui}
 .family-owner-filter.visible{display:inline-flex}
-.family-owner-filter select{width:auto;max-width:180px;box-sizing:border-box;border:1px solid rgba(255,255,255,.45);border-radius:8px;background:#202020;color:#fff;padding:7px 28px 7px 9px;font:700 13px system-ui;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+.family-owner-filter.floating{position:fixed}
+.family-owner-filter select{width:auto;max-width:min(220px,45vw);box-sizing:border-box;border:1px solid rgba(255,255,255,.45);border-radius:8px;background:#202020;color:#fff;padding:7px 28px 7px 9px;font:700 13px system-ui;box-shadow:0 8px 24px rgba(0,0,0,.25)}
 .family-owner-filter option{background:#202020;color:#fff}
 @media(max-width:640px){.family-add-fab{right:14px;bottom:14px}.family-add-jobs{right:14px;bottom:82px}.family-add-card{border-radius:14px}}
 `;
@@ -128,7 +129,7 @@
 
   function archiveItemsRequest(input, init = {}) {
     const method = String(init?.method || input?.method || 'GET').toUpperCase();
-    if (method !== 'GET' || !selectedArchiveOwner) return null;
+    if (method !== 'GET') return null;
     const headers = requestHeaders(init);
     if (headers.get('X-Family-Archive-Bypass')) return null;
     const raw = typeof input === 'string' ? input : input?.url || '';
@@ -142,6 +143,9 @@
     if (!/^\/(?:Users\/[0-9a-fA-F-]+\/)?Items$/i.test(url.pathname)) return null;
     const parentId = url.searchParams.get('ParentId') || '';
     if (!parentId || parentId.toLowerCase() !== currentItemId().toLowerCase()) return null;
+    if (!isArchiveView()) return null;
+    const rootArchive = !currentArchiveAlbumSync();
+    if (!rootArchive && !selectedArchiveOwner) return null;
     const originalStart = Number.parseInt(url.searchParams.get('StartIndex') || '0', 10) || 0;
     const originalLimit = Number.parseInt(url.searchParams.get('Limit') || '100', 10) || 100;
     const fields = new Set(String(url.searchParams.get('Fields') || '').split(',').map((item) => item.trim()).filter(Boolean));
@@ -149,17 +153,31 @@
     url.searchParams.set('Fields', Array.from(fields).join(','));
     url.searchParams.set('StartIndex', '0');
     url.searchParams.set('Limit', '5000');
-    return { url, originalStart, originalLimit };
+    if (rootArchive) {
+      url.searchParams.set('Recursive', 'false');
+      url.searchParams.delete('IncludeItemTypes');
+      url.searchParams.delete('IsPlayed');
+      url.searchParams.delete('IsFavorite');
+    }
+    return { url, originalStart, originalLimit, rootArchive };
   }
 
   async function filteredArchiveItemsResponse(nativeFetch, input, init, requestInfo) {
-    await loadArchiveOwners(await currentArchiveAlbum());
+    await loadArchiveOwners(requestInfo.rootArchive ? '' : await currentArchiveAlbum());
     const response = await nativeFetch(requestInfo.url.toString(), init);
     if (!response.ok) return response;
     const data = await response.clone().json().catch(() => null);
     if (!data || !Array.isArray(data.Items)) return response;
     const owner = selectedArchiveOwner;
-    const filtered = data.Items.filter((item) => ownerMatchesPath(item.Path || item.path || '', owner));
+    const filtered = requestInfo.rootArchive
+      ? data.Items.filter((item) => {
+        const itemPath = item.Path || item.path || '';
+        const itemType = item.Type || item.type || '';
+        if (!itemPath.includes('/media/FamilyArchive/')) return false;
+        if (owner && !ownerMatchesPath(itemPath, owner)) return false;
+        return itemType.includes('PhotoAlbum') || item.IsFolder || item.isFolder || !pathBasename(itemPath).includes('.');
+      })
+      : data.Items.filter((item) => ownerMatchesPath(item.Path || item.path || '', owner));
     data.TotalRecordCount = filtered.length;
     data.StartIndex = requestInfo.originalStart;
     data.Items = filtered.slice(requestInfo.originalStart, requestInfo.originalStart + requestInfo.originalLimit);
@@ -620,6 +638,14 @@
     return null;
   }
 
+  function currentArchiveAlbumSync() {
+    if (!isArchiveView()) return '';
+    const title = currentShowTitle();
+    if (title && !['Семейный Архив', 'Семейный архив'].includes(title)) return title;
+    if (archiveAlbumCacheKey !== location.href) return '';
+    return archiveAlbumCacheValue || '';
+  }
+
   function positionArchiveOwnerFilter() {
     const button = archiveFilterButton();
     if (!button) return;
@@ -632,14 +658,16 @@
   }
 
   function archiveToolbarHost() {
-    const nodes = document.querySelectorAll('button,a,.emby-button,.paper-icon-button');
+    const nodes = document.querySelectorAll('button,a,.emby-button,.paper-icon-button,select');
     for (const node of nodes) {
       if (node.offsetParent === null) continue;
-      if (!['Filter', 'Фильтр', '⋮'].includes(visibleText(node))) continue;
+      const label = visibleText(node) || node.getAttribute?.('aria-label') || node.getAttribute?.('title') || '';
+      if (!/Filter|Фильтр|Sort|Сорт|Play All|Shuffle|⋮/i.test(label)) continue;
       let host = node.parentElement;
       for (let i = 0; i < 7 && host; i += 1) {
-        const text = visibleText(host);
-        if (text.includes('Filter') && (text.includes('Sort by') || text.includes('Play All') || text.includes('Shuffle') || text.includes('⋮'))) return host;
+        const buttons = host.querySelectorAll('button,a,.emby-button,.paper-icon-button,select');
+        const rect = host.getBoundingClientRect();
+        if (buttons.length >= 2 && rect.width > 120 && rect.height < 96) return host;
         host = host.parentElement;
       }
     }
@@ -647,6 +675,15 @@
   }
 
   function mountArchiveOwnerFilter() {
+    const host = archiveToolbarHost();
+    if (host) {
+      ownerFilter.classList.remove('floating');
+      ownerFilter.style.left = '';
+      ownerFilter.style.top = '';
+      if (ownerFilter.parentElement !== host) host.append(ownerFilter);
+      return;
+    }
+    ownerFilter.classList.add('floating');
     if (!document.body.contains(ownerFilter)) document.body.append(ownerFilter);
     positionArchiveOwnerFilter();
   }
@@ -735,9 +772,10 @@
 
   async function updateArchiveOwnerControl() {
     const album = await currentArchiveAlbum();
-    const showOwnerFilter = Boolean(album);
+    const showOwnerFilter = isArchiveView();
     ownerFilter.classList.toggle('visible', showOwnerFilter);
     if (!showOwnerFilter) {
+      ownerFilter.classList.remove('floating');
       ownerFilter.style.left = '';
       ownerFilter.style.top = '';
       document.querySelectorAll('[data-family-owner-hidden="1"]').forEach((node) => {
@@ -1305,7 +1343,10 @@
       node.style.display = '';
       node.removeAttribute('data-family-owner-hidden');
     });
-    window.setTimeout(() => window.location.reload(), 50);
+    scheduleArchiveOwnerFilter();
+    try {
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    } catch {}
   };
   close.onclick = closeDialog;
   dialog.onclick = (event) => { if (event.target === dialog) closeDialog(); };
